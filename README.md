@@ -35,9 +35,7 @@ The gateway terminal also accepts typed lines as a shortcut without an IEC clien
 
 ### Demo video
 
-<video src="mbclient.webm" controls width="720"></video>
-
-If the player does not show, open [mbclient.webm](mbclient.webm).
+[Watch the demo (mbclient.webm)](mbclient.webm)
 
 ## Layout
 
