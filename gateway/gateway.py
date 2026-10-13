@@ -135,8 +135,20 @@ class Gateway:
                 "IEC 104 silent for %.0fs; fallback mode=%s", silent_s, self.cfg.fallback_mode.value
             )
         if self.cfg.fallback_mode is FallbackMode.SAFE_LIMIT and not self._fallback_applied:
+            target = self.cfg.fallback_limit_pct
             async with self._lock:
-                result = await self._write_and_verify(self.cfg.fallback_limit_pct)
+                try:
+                    current = await self._inv.read_limit()
+                except InverterError as exc:
+                    # Current limit unknown: writing could raise it. Retry at the next check.
+                    log.error("fallback skipped, cannot read current limit: %s", exc)
+                    return
+                if current <= target:
+                    # The fallback may only tighten the limit, never raise it.
+                    log.warning("fallback not written: limit %s%% is already <= %s%%", current, target)
+                    self._fallback_applied = True
+                    return
+                result = await self._write_and_verify(target)
             self._fallback_applied = result.ok  # on failure, retry at the next check
             if not result.ok:
                 log.error("fallback limit not applied (%s); will retry", result.reason)

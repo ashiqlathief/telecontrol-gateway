@@ -12,7 +12,7 @@ HOLDING = 3  # function code used for the datastore accessors
 
 
 class InverterSim:
-    def __init__(self, host: str = "127.0.0.1", port: int = 5020, available_w: int = 80_000):
+    def __init__(self, host: str = "127.0.0.1", port: int = 5020, available_w: int = 100_000):
         self.available_w = available_w
         device = SimDevice(1, [SimData(0, count=SIZE, values=0, datatype=DataType.REGISTERS)])
         self._address = (host, port)

@@ -44,17 +44,20 @@ async def main() -> None:
     ap.add_argument("--host", default="127.0.0.1")
     ap.add_argument("--port", type=int, default=5020)
     ap.add_argument("--fallback", choices=[m.value for m in FallbackMode], default="hold")
-    ap.add_argument("--fallback-limit", type=int, default=100)
+    ap.add_argument("--fallback-limit", type=int, default=None, help="required with --fallback safe_limit")
     ap.add_argument("--iec-port", type=int, default=2404, help="IEC 104 listen port, 0 = off")
     ap.add_argument("--iec-timeout", type=float, default=60.0)
     a = ap.parse_args()
-    cfg = Config(
-        host=a.host,
-        port=a.port,
-        fallback_mode=FallbackMode(a.fallback),
-        fallback_limit_pct=a.fallback_limit,
-        iec_loss_timeout_s=a.iec_timeout,
-    )
+    try:
+        cfg = Config(
+            host=a.host,
+            port=a.port,
+            fallback_mode=FallbackMode(a.fallback),
+            fallback_limit_pct=a.fallback_limit,
+            iec_loss_timeout_s=a.iec_timeout,
+        )
+    except ValueError as exc:
+        ap.error(str(exc))
     gw = Gateway(ModbusInverter(cfg.host, cfg.port, cfg.device_id, cfg.modbus_timeout_s), cfg)
     iec = None
     on_cycle = None

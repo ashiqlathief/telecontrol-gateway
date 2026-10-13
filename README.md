@@ -1,31 +1,6 @@
 # Mini telecontrol gateway
 
-Sits between a Modbus TCP PV inverter and an IEC 60870-5-104 peer (direct marketer).It polls the inverter every second, converts values to IEC 104 units, flags stale data as invalid, and accepts active power limits with write / read-back / confirm.
-
-**Scope:** Part A (core logic, tests) and Part B (a real IEC 104 server using the open-source `c104` library, with a demo client). The server is a basic controlled station:see "What is missing" for what it does not do.
-
-## How it works
-
-```
-direct marketer  <-- IEC 104 -->  gateway  <-- Modbus TCP -->  PV inverter
-(reads values,                    (converts, checks,            (registers
- sends limits)                     verifies, fails safe)         40000-40010)
-```
-
-**Every second (poll cycle):**
-1. Read registers 40000-40005 (P, Q, f, status) and 40010 (limit) from the inverter.
-2. Convert to IEC 104 units (W to kW, 0.01 Hz to Hz) and store with a receive timestamp.
-3. Publish changed values to the IEC 104 peer. Values older than 5 s go out with the IV flag.
-4. Check how long the IEC 104 peer has been silent; after 60 s run the fallback policy.
-
-**On a limit command (C_SE_NC_1, IOA 5001):**
-1. Validate: whole number 0-100, otherwise negative confirmation, nothing written.
-2. Write register 40010 (retry on failure), then read it back.
-3. Positive confirmation only if the read-back equals the command. Any failure gives a
-   negative confirmation, and the limit point is invalidated if its true value is unknown.
-
-The rule behind all of it: a wrong value is worse than no value, so the gateway reports
-"invalid" or "rejected" instead of guessing.
+Sits between a Modbus TCP PV inverter and an IEC 60870-5-104 peer (direct marketer). It polls the inverter every second, converts values to IEC 104 units, flags stale data as invalid, and accepts active power limits with write / read-back / confirm.
 
 ## Run
 
@@ -33,20 +8,36 @@ Python 3.12.
 
 ```
 python3 -m venv .venv && .venv/bin/pip install pymodbus c104 pytest pytest-asyncio ruff
-.venv/bin/python -m pytest -q          # 70 tests, ~3 s
+.venv/bin/python -m pytest -q          # 76 tests, ~3 s
 .venv/bin/ruff check .
 ```
-Demo, three terminals:
+Demo, four terminals (start them in this order):
 
 ```
-.venv/bin/python -m sim.inverter_sim --port 5020        # simulated inverter, 80 kW available
-.venv/bin/python -m gateway --port 5020                 # gateway; IEC 104 server on :2404
-.venv/bin/python -m sim.demo_client --limit 40          # the "direct marketer"
+# terminal 1: simulated inverter, 100 kW available
+.venv/bin/python -m sim.inverter_sim --port 5020
+
+# terminal 2: the gateway; IEC 104 server on :2404; prints all five points every second
+.venv/bin/python -m gateway --port 5020
+
+# terminal 3: the "direct marketer" watching; reads once, then prints every change for 60 s
+.venv/bin/python -m sim.demo_client --watch 60
+
+# terminal 4: a second "direct marketer" sending a limit
+.venv/bin/python -m sim.demo_client --limit 40
 ```
 
-The client connects, does a general interrogation, prints IOA 1001-1005, sends `C_SE_NC_1` on IOA 5001 and prints the confirmation (positive/negative) and the updated values. Try `--limit 150` or `--limit 50.5` for a negative confirmation. Stop the inverter simulator, wait 6 s, run the client again: every point is printed as `INVALID`.
+`sim.demo_client` connects, does a general interrogation and prints IOA 1001-1005. With `--limit` it also sends `C_SE_NC_1` on IOA 5001 and prints the confirmation (positive/negative). With `--watch N` (default 3) it then stays connected for N seconds and prints every change with its time and quality flag, then prints the final values.
+
+What to look for: run terminal 4 while terminal 3 is watching. Terminal 3 prints IOA 1001, 1004 and 1005 changing within about a second (100 kW to 40 kW, limit 100 to 40, status 1 to 2). Try `--limit 150` or `--limit 50.5` for a negative confirmation: nothing changes. Stop the inverter simulator, wait 6 s, run a client again: every point is printed as `INVALID`.
 
 The gateway terminal also accepts typed lines as a shortcut without an IEC client: `limit 40`, `ping` (IEC link sign of life). Options: `--iec-port N` (0 = off), `--fallback hold|safe_limit`, `--fallback-limit N`, `--iec-timeout SECONDS`. Other 104 clients should work too (common address 1, IOAs as in the task); I only tested with `c104`'s own client.
+
+### Demo video
+
+<video src="mbclient.webm" controls width="720"></video>
+
+If the player does not show, open [mbclient.webm](mbclient.webm).
 
 ## Layout
 
@@ -62,14 +53,38 @@ The gateway terminal also accepts typed lines as a shortcut without an IEC clien
 | `sim/demo_client.py` | c104 client acting as the direct marketer |
 | `tests/` | Unit tests with a fake inverter and fake clock, plus Modbus TCP and IEC 104 integration tests |
 
-## Design decisions and what is missing
+## How to test
 
-The reasoning behind each requirement (stale data, limit commands with read-back, the
-fallback default and why, the IEC 104 layer) and the full list of what is missing for use on
-a real plant are in [`tex/wattsinn_questions_explained.pdf`](tex/wattsinn_questions_explained.pdf)
-(sections 3 and 6: implementation and limitations). The two written answers are in `ANSWERS.md`.
+Automated (76 tests, ~3 s, no hardware, a fake clock replaces real waiting):
 
-In short: the default fallback on IEC 104 link loss is **hold the last limit** (configurable
-to a safe preset); stale values go out with the IV flag; a command is confirmed only after
-a read-back match. Not covered: a full IEC 104 feature set, real-device verification and a
-plant controller.
+```
+.venv/bin/python -m pytest -q
+.venv/bin/ruff check .
+```
+
+Run one requirement at a time (add `-v` to see every test name). No real hardware is involved:
+the inverter is either an in-memory fake or the simulator in `sim/`.
+
+| Requirement | Command | What it proves |
+|---|---|---|
+| R1 scaling (12 tests) | `.venv/bin/python -m pytest -q tests/test_scaling.py` | int32 big-endian join, W to kW, 0.01 Hz, status enum |
+| R2 stale data (8) | `.venv/bin/python -m pytest -q tests/test_stale.py` | valid at exactly 5 s, invalid after; a failed read does not refresh the old value; recovery |
+| R3 commands (24) | `.venv/bin/python -m pytest -q tests/test_command.py` | 0-100 only; read-back mismatch, ignored write and write failure give a negative confirmation |
+| R4 fallback (15) | `.venv/bin/python -m pytest -q tests/test_fallback.py` | nothing before 60 s; `hold` does not write; `safe_limit` writes once and retries on failure; any IEC activity resets the timer |
+| Modbus over TCP, simulated inverter (3) | `.venv/bin/python -m pytest -q tests/test_integration.py` | the real Modbus code talks to the pymodbus simulator over a local socket; an unreachable inverter fails cleanly |
+| IEC 104 over TCP, Part B (14) | `.venv/bin/python -m pytest -q tests/test_iec104.py` | a c104 client talks to the gateway's server: quality flags, confirmations, link loss |
+
+A single test: `.venv/bin/python -m pytest -q tests/test_command.py -k readback_mismatch`.
+
+"Tests prove the fix": to check a test is not empty, remove the guard it covers
+(e.g. the `actual != pct` check in `gateway/gateway.py`) and run `pytest`; the matching test must fail.
+
+Manual fault injection with the demo from the Run section:
+
+| Do this | Expect |
+|---|---|
+| `--limit 150` or `--limit 50.5` | negative confirmation, inverter register unchanged |
+| Stop the inverter simulator, wait 6 s, run the client | every point printed `INVALID` |
+| Restart the simulator | points become valid again within ~1 s |
+| Start the gateway with `--iec-timeout 10 --fallback safe_limit --fallback-limit 20`, send no IEC traffic | after 10 s log "IEC 104 silent ... fallback", inverter limit becomes 20 % |
+
